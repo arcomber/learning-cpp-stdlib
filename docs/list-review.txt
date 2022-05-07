@@ -1,0 +1,1191 @@
+There's no point in a design review, because this class is simply a remake of std::list, so I'll just dive right into the code review.
+
+You don't specify which version of C++ you're targeting, so I'll assume the lastest, which is C++20. However... C++20 is the biggest update in the language in almost a decade, which means it radically changes how you write a lot of code. That means C++20 code can often be very different from C++17. And, unfortunately, C++20 still isn't widely and well supported in its entirety. So, for sake of practicality, I'll show how I'd do things in both C++17 and C++20.
+
+template< typename T >
+class list {
+You really should put all your stuff in a namespace.
+
+The standard container interface requires a whole bunch of type aliases:
+
+value_type
+size_type
+difference_type
+reference
+const_reference
+To support bidirectional iteration, you'll probably also want these:
+
+reverse_iterator
+const_reverse_iterator
+    struct node {
+        node(T const& v) : value(v), next(nullptr), prior(nullptr) { }
+
+        // learn about these variadic arguments
+        template <typename ...Args>
+        node(Args &&...v) : value(std::forward<Args>(v)...), next(nullptr), prior(nullptr) { }
+
+        T value;
+        node* next;
+        node* prior;
+    };
+This class should be private; there is no need for it to be part of the public interface. It's just an internal detail.
+
+You don't need any of the constructors. (The first one, in particular, is just a special case of the second.) In fact, removing them is a good thing, because it allows aggregate initialization.
+
+Add to that member initializers, and you get this:
+
+struct node
+{
+    T value;
+    node* next = nullptr;
+    node* prior = nullptr;
+};
+That's all you need. And in your emplace_back() or emplace_front() functions, you could create a node like this:
+
+template <typename... Args>
+auto emplace_back(Args&&... v) -> reference
+{
+    auto new_node = new node{T(std::forward<Args>(v)...)};
+
+    // ... and so on ...
+new_node.next and new_node.prior are automatically set to nullptr. But you could use designated initializers if you want:
+
+    auto new_node = new node{
+        .value = T(std::forward<Args>(v)...),
+        .prior = tail_
+    };
+    // new_node.next defaults to nullptr
+Now, there is a major problem with how you've implemented iterators, but it’s very subtle, so I’ll first review the existing iterator, and then explain the problem.
+
+    struct iterator {
+In order to be a legit iterator, you need to define some types (or specialize iterator_traits... but this is way easier):
+
+difference_type
+value_type
+pointer
+reference
+iterator_category
+        iterator(node* nod) : ptr_(nod) {}
+This constructor should probably be private, and the list class should be a friend, so that only the list can create these iterators.
+
+It’s also in dire need of some decorators. At the very least, it should be both explicit and noexcept, but it should probably be constexpr as well.
+
+Incidentally, you should probably also add a default constructor. The legacy iterator concepts require it, but I’m honestly not sure whether the modern concepts do (and can’t be bothered to check, but I’m 90% sure they do). In any case, it's a good quality-of-life addition. You could initialize the internal pointer to nullptr, or leave it as randomly initialized; it doesn’t matter because no one should ever use a default-constructed iterator.
+
+        iterator& operator++() {
+            if (ptr_) {
+                ptr_ = ptr_->next;
+            }
+            return *this;
+        }
+
+        iterator operator++(int) {
+            auto old = *this;
+            if (ptr_) {
+                ptr_ = ptr_->next;
+            }
+            return old;
+        }
+These operations should both be noexcept, and probably constexpr.
+
+Now, the iterators for std::list are bidirectional iterators, which means you also need operator-- (both prefix and postfix).
+
+        node* ptr_;
+This should be private.
+
+Okay, now, let's talk about the major problem. The real locus of the problem is here:
+
+    // O(1)
+    iterator begin() {
+        return iterator(head_);
+    }
+    const iterator begin() const {
+        return iterator(head_);
+    }
+
+    // O(1)
+    iterator end() {
+        return nullptr;
+    }
+    const iterator end() const {
+        return nullptr;
+    }
+The problem, simply put, is this: const iterator is not the same as const_iterator.
+
+You see, the correct return from the const version of begin() and end() is NOT const iterator, it's const_iterator… and those are two completely different types.
+
+This is a very subtle and complicated issue, and it's even tripped up people who write blog posts about iterators.
+
+In fact, it is even possible to illustrate the problem with your implementation.
+
+auto func(list<int> const& the_list)
+{
+    // We have taken the list as a CONST reference,
+    // so it should be impossible to mutate it.
+    //
+    // However...
+
+    auto it = the_list.begin();
+    *it = 420;
+}
+
+auto main() -> int
+{
+    auto ones = list<int>{1, 1, 1};
+
+    std::cout << "Before: ";
+    for (auto&& one : ones)
+        std::cout << one << ' ';
+
+    func(ones);
+
+    std::cout << "\nAfter:  ";
+    for (auto&& one : ones)
+        std::cout << one << ' ';
+}
+
+// Output:
+//  Before: 1 1 1 
+//  After:  420 1 1 
+Note that you could even make the line auto const it = the_list.begin();, and it will still allow mutating the list.
+
+To understand what's going on here, you have to remember that with iterators, there are two types of const:
+
+The ITERATOR can be const, which means you can't change it, either by reassignment or operator++ or anything.
+The iterator's TARGET can be const which means you can't mutate the thing that the iterator is pointing to.
+With a container's iterator—including yours—the TARGET is always non-const. The iterator itself can be either const or not, but the target is always mutable.
+
+With a container's const_iterator, the target is always const. The iterator itself may be const or not.
+
+Type	Can mutate iterator	Can mutate target
+iterator	✔	✔
+const iterator	✘	✔
+const_iterator	✔	✘
+const const_iterator	✘	✘
+iterator and const_iterator are completely different types; there is no possible way, in the general case, to transform one to the other by using meta-programming operations like add/remove const.
+
+Indeed, basically the only relationship between the two types is that iterator must be implicitly convertible to const_iterator. This makes sense if you think about it. It's the same logic that allows non-const values to be implicitly convertible to const references, so func(string const&) can be called without having to cast the string to const string.
+
+In theory, the way to implement this is to create two classes:
+
+class iterator
+{
+    node* ptr_;
+
+    constexpr iterator(node* p) noexcept : ptr_{p} {}
+
+public:
+    using value_type = T;
+
+    using difference_type = std::ptrdiff_t;
+
+    using pointer = T*;
+    using reference = T&;
+
+    using iterator_category = std::bidirectional_iterator_tag;
+
+    constexpr iterator() noexcept = default;
+
+    constexpr auto operator++() noexcept -> iterator&;
+    constexpr auto operator++(int) noexcept -> iterator;
+
+    constexpr auto operator--() noexcept -> iterator&;
+    constexpr auto operator--(int) noexcept -> iterator;
+
+    constexpr auto operator*() const -> reference;
+    constexpr auto operator->() const -> pointer;
+
+    constexpr auto operator==(iterator const&) noexcept = default;
+
+    friend list<T>;
+};
+
+class const_iterator
+{
+    node const* ptr_;
+
+    constexpr const_iterator(node const* p) noexcept : ptr_{p} {}
+
+public:
+    using value_type = T const;
+
+    using difference_type = std::ptrdiff_t;
+
+    using pointer = T const*;
+    using reference = T const&;
+
+    using iterator_category = std::bidirectional_iterator_tag;
+
+    constexpr const_iterator() noexcept = default;
+
+    // Implicit conversion from iterator:
+    constexpr const_iterator(iterator const&) noexcept;
+
+    constexpr auto operator++() noexcept -> const_iterator&;
+    constexpr auto operator++(int) noexcept -> const_iterator;
+
+    constexpr auto operator--() noexcept -> const_iterator&;
+    constexpr auto operator--(int) noexcept -> const_iterator;
+
+    constexpr auto operator*() const -> reference;
+    constexpr auto operator->() const -> pointer;
+
+    constexpr auto operator==(const_iterator const&) noexcept = default;
+
+    friend list<T>;
+};
+But as you can see, there's a lot of repetition there. So what I usually do is use a template with a bool parameter that determines whether the iterator is a const_iterator or not:
+
+template <bool Const>
+class iterator_t
+{
+    using node_ptr = std::conditional_t<Const,
+        node const*,
+        node*>;
+
+    node_ptr ptr_;
+
+    constexpr iterator_t(node_ptr p) noexcept : ptr_{p} {}
+
+public:
+    using value_type = std::conditional_t<Const,
+        std::add_const_t<T>,
+        T>;
+
+    using difference_type = std::ptrdiff_t;
+
+    using pointer = value_type*;
+    using reference = value_type&;
+
+    using iterator_category = std::bidirectional_iterator_tag;
+
+    constexpr iterator_t() noexcept = default;
+
+    // Implicit conversion from iterator:
+    constexpr iterator_t(iterator_t<false> const&) noexcept requires Const;
+    // Note I use a C++20 requires clause here, but this can also be done
+    // in C++17... it's just more verbose.
+
+    constexpr auto operator++() noexcept -> iterator_t&;
+    constexpr auto operator++(int) noexcept -> iterator_t;
+
+    constexpr auto operator--() noexcept -> iterator_t&;
+    constexpr auto operator--(int) noexcept -> iterator_t;
+
+    constexpr auto operator*() const -> reference;
+    constexpr auto operator->() const -> pointer;
+
+    constexpr auto operator==(iterator_t const&) noexcept = default;
+
+    friend list<T>;
+};
+
+using iterator = iterator_t<false>;
+using const_iterator = iterator_t<true>;
+Once you make a proper const_iterator type, then you should use it where appropriate (and not use const iterator).
+
+    // O(1)
+    list() : head_(nullptr), tail_(nullptr), size_(0) {}
+If you use member initializers:
+
+    node* head_ = nullptr;
+    node* tail_ = nullptr;
+    size_type size_ = 0;
+Then the default constructor becomes as simple as:
+
+    list() = default;
+And the same goes for all other constructors, which eliminates a lot of verbosity, repetition, and chance for mistakes.
+
+And, of course, you should add some extra flavour:
+
+    constexpr list() noexcept = default;
+Default construction cannot fail, and constexpr is just something you should do whenever possible.
+
+    // O(n)
+    template< typename input_iterator >
+    list(input_iterator first, input_iterator last) : head_(nullptr), tail_(nullptr), size_(0) {
+
+        for (auto it = first; it != last; ++it) {
+            push_back(*it);
+        }
+    }
+You have a bug here. push_back() can fail, and throw an exception. So imagine you have been given a range with 3 elements… you push_back() the first two with no problems, then when trying to push_back() the third, an exception is thrown. When that happens, the destructor is not called—because the destructor will not run unless at least one constructor completes. That means you leak those first two allocations.
+
+There are actually many, many ways to fix this, so you can choose the method you like best.
+
+Perhaps the simplest is just to ensure that at least one constructor has completed. You can do that by delegating to the default constructor:
+
+    template <typename InputIterator>
+    constexpr list(InputIterator first, InputIterator last)
+        : list{}    // delegate to default constuctor
+    {
+        // By the time you get here, the default constructor has completed,
+        // so if an exception is thrown below, the destructor will be called.
+
+        std::for_each(first, last, [this](auto&& item) { push_back(item); });
+    }
+You'll definitely want to include a comment to explain that you must delegate, or there will be a bug.
+
+You could also use try-catch:
+
+    template <typename InputIterator>
+    constexpr list(InputIterator first, InputIterator last)
+    {
+        try
+        {
+            std::for_each(first, last, [this](auto&& item) { push_back(item); });
+        }
+        catch (...)
+        {
+            clear();
+            throw;  // rethrow the exception
+        }
+    }
+Or a function try-catch:
+
+    template <typename InputIterator>
+    constexpr list(InputIterator first, InputIterator last)
+    try
+    {
+        std::for_each(first, last, [this](auto&& item) { push_back(item); });
+    }
+    catch (...)
+    {
+        clear();
+        // implicit rethrow
+    }
+Now, you may have noticed that I renamed input_iterator to InputIterator. That's because as of C++20, there is actually a concept named input_iterator, which you would use like this:
+
+constepxr list(input_iterator auto first, input_iterator auto last)
+    : list{}
+{
+    // ...
+}
+So you can see that if you use input_iterator as a template parameter name, it could create confusion.
+
+If you are going to go the C++20 route, there are a number of improvements you could make. The first is that, as of C++20, rather than a pair of iterators, the standard interface is an iterator and a sentinel:
+
+template <std::input_iterator I, std::sentinel_for<I> S>
+constexpr list(I first, S last)
+    : list{}
+{
+    std::ranges::for_each(first, last, [this](auto&& item) { push_back(item); });
+}
+And then you might as well add a range constructor:
+
+constepxr list(std::input_range auto&& r)
+    : list{std::ranges::begin(r), std::ranges::end(r)}
+{}
+With that, you don't even need the initializer list constructor.
+
+    // O(n) - copy constructor
+    list(const list& other) : head_(nullptr), tail_(nullptr), size_(0) {
+        auto it = other.begin();
+        while (it != nullptr) {
+            push_back(*it);
+            ++it;
+        }
+        size_ = other.size();
+    }
+Since you've already written a constructor that builds the list from iterators, there doesn't seem to be much point in reimplementing it. You might as well do:
+
+constexpr list(list const& other)
+    : list{other.begin(), other.end()}
+{}
+There doesn't really seem to be a way to make copying more efficient than this, so… might as well.
+
+You're missing a couple of constructors, at least one of which might be very useful later:
+
+list(size_type n)
+list(size_type n, T const& value)
+Both construct a list with n items, but the first default-constructs each item, while the second copy-constructs. You can implement the first as:
+
+constexpr list(size_type n)
+    : list{}
+{
+    for (auto i = size_type(0); i != n; ++i)
+        emplace(tail_);
+}
+That is, by passing zero emplacement arguments, you're basically value-initializing, which is what you want.
+
+The other overload is the same, except you pass value as the single emplacement argument. Simple.
+
+    // O(n) copy assignment 
+    // - because although we just swap pointers, note list is copied - first arg is copied
+    // note also that we don't need to define a copy assignment move operator - this one does it!
+    // If called with an rvalue reference will use move constructor to create other and then swap with the current state.
+    list& operator=(list other)
+    {
+        swap(*this, other);
+        return *this;
+    }
+You're trying to be clever here, but unfortunately, it's backfiring.
+
+The reason is because you really, really want your move ops to be noexcept, if at all possible. And, of course, it is possible with this list.
+
+But of course, your copy ops can't be noexcept. So… you really want two functions: a noexcept move assignment and a non-noexcept copy assignment. Trying to jam them both into one defeats that goal.
+
+Now, technically, you could slap a noexcept on the function above. It would be legal, because technically the copy (construction) happens BEFORE the assignment operation begins. By the time the assignment operator starts, the copy's already done, so everything that follows is no-fail, and thus, noexcept.
+
+But that's just bad form, because it will definitely confuse people. I'm all about reducing repetition, and writing less code… but in this situation, it doesn't seem worth the confusion just to remove three or four lines. I mean, hell, you've got more lines of comment explaining what's going on than you have actual code!
+
+This is more idiomatic, clearer, and requires no explanation:
+
+constexpr auto operator=(list const& other) -> list&
+{
+    auto temp = other;
+    swap(*this, temp);
+    return *this;
+}
+
+constexpr auto operator=(list&& other) noexcept -> list&
+{
+    swap(*this, other);
+    return *this;
+}
+Plus, that's more efficient, because when doing a move assignment, you don't need to move the argument twice. And when doing a copy assignment, there's no unnecessary move.
+
+Note also there is another assignment operator overload that takes an initializer list. This is trivial to make: it's the same as the copy-assignment operator except you don't copy-construct temp, you construct it with the initializer list. Then just swap.
+
+Speaking of swapping:
+
+    // O(1) - just 3 swaps
+    friend void swap(list& first, list& second) // nothrow
+    {
+        // by swapping the members of list,
+        // first and second are effectively swapped
+        std::swap(first.size_, second.size_);
+        std::swap(first.head_, second.head_);
+        std::swap(first.tail_, second.tail_);
+    }
+This is not the correct way to swap in C++17 and before. You need to do the std::swap() two-step:
+
+    friend void swap(list& first, list& second) // nothrow
+    {
+        using std::swap;
+        swap(first.size_, second.size_);
+        swap(first.head_, second.head_);
+        swap(first.tail_, second.tail_);
+    }
+Now, technically the way you wrote it works… for now. But it's brittle. If the class is changed in any significant way, it will break. For example, maybe someone changes the type of head_ to be something like gsl::not_null<node*>. If you did the std::swap() two-step, everything would just continue to work.
+
+If you're using C++20, of course, you can avoid the problem altogether by using std::ranges::swap():
+
+    friend void swap(list& first, list& second) // nothrow
+    {
+        std::ranges::swap(first.size_, second.size_);
+        std::ranges::swap(first.head_, second.head_);
+        std::ranges::swap(first.tail_, second.tail_);
+    }
+By the way… why comment “nothrow”? Why not use noexcept? (As you should; swap operations should be noexcept.)
+
+    // O(n)
+    void clear() {
+        if (head_) {
+            node* current = head_;
+            while (current) {
+                node* next = current->next;
+                delete current;
+                current = next;
+            }
+        }
+        head_ = nullptr;
+        tail_ = nullptr;
+        size_ = 0;
+    }
+This function isn't wrong, but it could be simplified. There's no point in testing that head_ is nullptr twice:
+
+constexpr auto clear() noexcept
+{
+    auto current = head_;
+    while (current)
+    {
+        auto next = current->next;
+        delete current;
+        current = next;
+    }
+
+    head_ = nullptr;
+    tail_ = nullptr;
+    size_ = 0;
+}
+You should also mark the function noexcept (at least; probably also constexpr).
+
+    // O(1)
+    bool empty() const {
+        return head_ == nullptr;
+    }
+Needs noexcept (and constexpr).
+
+    // O(n)
+    bool operator==(const list<T>& other) { 
+
+        if (size_ != other.size()) {
+            return false;
+        }
+
+        for (auto it = begin(), it2 = other.begin(); it != end(); ++it, ++it2) {
+            if (*it != *it2) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+Should definitely be const… and noexcept (and constexpr).
+
+This function could be greatly simplified:
+
+constexpr auto operator==(list const& other) const noexcept
+{
+    return std::ranges::equal(begin(), other.begin(), end(), other.end());
+}
+Now, in C++20, this is all you need to get equality comparisons, because operator!= will be synthesized from this. But in C++17 and before, you need to actually write it (and, of course, you can't use the ranges version of equal(), but the old school version is the same). But that's simple: { return not (*this == other); }.
+
+However, lists also support general comparisons. In C++17, that means writing four more functions, for operator<, operator>, operator<=, and operator>= (though, of course, you can delegate to avoid lots of code duplication; operator>= is just not operator<, for example). In C++20, you would just need operator<=>, and you could implement as a one-liner similar to operator== above using std::lexicographical_compare_three_way().
+
+    // O(1)
+    // pos - iterator before which the content will be inserted. pos may be the end() iterator
+    // returns iterator pointing to the inserted value
+    iterator insert(iterator pos, const T& value) {
+        node* inserted = new node;
+        inserted->value = value;
+        inserted->next = pos.ptr_;
+
+        // if pos.ptr_ is null means inserting at end of list
+        if (pos.ptr_ == nullptr) {
+            inserted->prior = tail_;
+            if (tail_ != nullptr) {
+                tail_->next = inserted;
+            }
+            else {
+                // if tail_ is null, head_ must also be null
+                head_ = tail_ = inserted;
+            }
+            tail_ = inserted;
+        }
+        else {
+            inserted->prior = pos.ptr_->prior;
+            pos.ptr_->prior = inserted;
+        }
+
+        // if inserted is now at head_, update head_
+        if (inserted->prior == nullptr) {
+            head_ = inserted;
+        }
+
+        return inserted;
+    }
+
+    // O(1)
+    void push_back(const T& value) {
+
+        node* newnode = make_node(value);
+
+        if (tail_) {
+            node* oldtail = tail_;
+            oldtail->next = newnode;
+            newnode->prior = oldtail;
+            tail_ = newnode;
+        }
+        else {
+            head_ = tail_ = newnode;
+        }
+        ++size_;
+    }
+
+    // O(1)
+    void push_front(const T& value) {
+
+        node* newnode = make_node(value);
+
+        if (head_) {
+            newnode->next = head_;
+            newnode->value = value;
+            head_->prior = newnode;
+            head_ = newnode;
+        }
+        else {
+            head_ = tail_ = newnode;
+        }
+        ++size_;
+    }
+
+    // ... [snip] ...
+
+    // O(1)
+    template<typename... P>
+    void emplace_back(P&&... v)
+    {
+        node* newnode = new node(std::forward<P>(v)...);
+        newnode->next = nullptr;
+        newnode->prior = nullptr;
+
+        if (tail_) {
+            node* oldtail = tail_;
+            oldtail->next = newnode;
+            newnode->prior = oldtail;
+            tail_ = newnode;
+        }
+        else {
+            head_ = tail_ = newnode;
+        }
+        ++size_;
+    }
+You have a lot of repetition; these functions are all essentially identical, the only differences being how the new value is constructed, and where it's put.
+
+For example, consider push_back(). There should be two flavours of push_back(), one for lvalues, and one for rvalues. But both can delegate to emplace_back():
+
+constexpr auto push_back(T const& value)
+{
+    emplace_back(value);
+}
+
+constexpr auto push_back(T&& value)
+{
+    emplace_back(std::move(value));
+}
+But we can go even further, because both of those and emplace_back() can delegate to emplace():
+
+constexpr auto push_back(T const& value)
+{
+    emplace(end(), value);
+}
+
+constexpr auto push_back(T&& value)
+{
+    emplace(end(), std::move(value));
+}
+
+template <typename... Args>
+constexpr auto emplace_back(Args&&... args) -> reference
+{
+    return *emplace(end(), std::forward<Args>(args)...);
+}
+Similarly, push_front() and emplace_front() can also delegate to emplace().
+
+So can the single-parameter overloads of insert():
+
+constexpr auto insert(const_iterator p, T const& value) -> iterator
+{
+    return emplace(p, value);
+}
+
+constexpr auto insert(const_iterator p, T&& value) -> iterator
+{
+    return emplace(p, std::move(value));
+}
+The key, you see, is emplace(). Get that right, and everything else is gravy.
+
+Unfortunately, you don't have emplace(). But you do have insert(). So let's look at that:
+
+    // O(1)
+    // pos - iterator before which the content will be inserted. pos may be the end() iterator
+    // returns iterator pointing to the inserted value
+    iterator insert(iterator pos, const T& value) {
+        node* inserted = new node;
+        inserted->value = value;
+        inserted->next = pos.ptr_;
+
+        // if pos.ptr_ is null means inserting at end of list
+        if (pos.ptr_ == nullptr) {
+            inserted->prior = tail_;
+            if (tail_ != nullptr) {
+                tail_->next = inserted;
+            }
+            else {
+                // if tail_ is null, head_ must also be null
+                head_ = tail_ = inserted;
+            }
+            tail_ = inserted;
+        }
+        else {
+            inserted->prior = pos.ptr_->prior;
+            pos.ptr_->prior = inserted;
+        }
+
+        // if inserted is now at head_, update head_
+        if (inserted->prior == nullptr) {
+            head_ = inserted;
+        }
+
+        return inserted;
+    }
+Okay, the way you construct the node is not correct. In the first line, you default-construct the T inside the node… then on the second, you copy-assign value to it.
+
+But what if T is not default-constructible at all?
+
+Or what if default-construction followed by copy-assignment produces a different value than copy-construction? (Yeah, that would be a shitty type, you have to keep such Machiavellian nonsense in mind when making a container.)
+
+If you followed the advice to make node an aggregate type, then you could just do:
+
+    auto inserted = new node{value, pos.ptr_};
+Or, in C++20, if you like:
+
+    auto inserted = new node{
+        .value = value,
+        .next = pos.ptr_
+    };
+Other than that, everything looks cool.
+
+So, now to transform this into emplace(), all you need to do is change that one line that constructs the node:
+
+    auto inserted = new node{
+        T{std::forward<Args>(args)...},
+        pos.ptr_
+    };
+And that's it.
+
+You might also consider adding a debug-mode check that ensures that pos is actually a valid iterator into *this. But, I mean, that's just icing on the cake; it's not really necessary.
+
+And once you have emplace(), then the single-argument overloads of insert(), as well as push_front(), push_back(), emplace_front(), and emplace_back() all delegate naturally.
+
+Ah, one thing I have to mention, though. In several of your functions, you do something like this:
+
+head_ = tail_ = newnode;
+Don't do that. Put each assignment on its own line.
+
+Now, there are also multi-value overloads of insert(), as well as assign(). There is also the case of resize() when the requested size is greater than the current size.
+
+Multi-value inserting is trickier than first appears. Your initial instinct may be to do this:
+
+// WRONG!!!
+template <typename InputIterator>
+constexpr auto insert(iterator p, InputIterator first, InputIterator last)
+{
+    if (first == last)
+        return p;
+
+    // Insert the first item, and save its location for returning later.
+    p = insert(p, *first++);
+    auto const result = p;
+
+    // Insert the rest.
+    for (; first != last; ++first)
+        p = insert(p, *first);
+
+    return result;
+}
+The reason why this wrong is because, let's say you're inserting 10 items, and 5 succeed… but then the 6th throws. Now the list is in a mixed-up, partially-updated state.
+
+What you want to do is offer the strong exception guarantee: either the operation succeeds, or everything is left in the state it was before the operation began. The easiest way to do that is to construct an entirely new list, then splice:
+
+constexpr auto insert(iterator p, InputIterator first, InputIterator last)
+{
+    if (first == last)
+        return p;
+
+    auto temp = list(first, last);  // This line can fail...
+
+    // ... but that's fine, because nothing has been modified yet.
+
+    // From this point on, nothing can fail.
+    splice(p, std::move(list));
+
+    // This is okay, because splicing won't invalidate any iterators.
+    return p++;
+}
+The assign() cases are probably best handled by constructing a new list and swapping.
+
+resize() needs two paths: one for when the list shrinks, and one for when it grows:
+
+constexpr auto resize(size_type n)
+{
+    if (n < size_)
+    {
+        // Erase size_ - n items from the back:
+        erase(std::prev(end(), size_ - n), end());
+    }
+    else
+    {
+        // Probably the best thing to do here is create a new list, then
+        // splice it:
+        splice(end(), list(n));
+    }
+}
+
+constexpr auto resize(size_type n, T const& value)
+{
+    // Everything exactly the same as above, except the last line is:
+    //  splice(end(), list(n, value));
+}
+The next bunch of functions just needs a lot of noexcept and constexpr love:
+
+    // O(1)
+    size_t size() const {
+        return size_;
+    }
+
+    // O(1)
+    iterator begin() {
+        return iterator(head_);
+    }
+    const iterator begin() const {
+        return iterator(head_);
+    }
+
+    // O(1)
+    iterator end() {
+        return nullptr;
+    }
+    const iterator end() const {
+        return nullptr;
+    }
+
+    // O(1)
+    T& front() { return *iterator(head_); }
+    const T& front() const { return *iterator(head_); }
+
+    // O(1)
+    T& back() { return *iterator(tail_); }
+    const T& back() const { return *iterator(tail_); }
+Also, the return types for the const versions of begin() and end() need to change.
+
+You'll also want cbegin()/cend() and the reverse-iterator stuff, too. And the container interface requires max_size()… which I agree is silly and useless, but… it's part of the standard interface:
+
+constexpr auto size() const noexcept { return size_; }
+constexpr auto max_size() const noexcept { return std::numeric_limits<size_type>::max(); }
+
+constexpr auto begin()        noexcept { return iterator{head_}; }
+constexpr auto begin()  const noexcept { return const_iterator{head_}; }
+constexpr auto cbegin() const noexcept { return const_iterator{head_}; }
+
+constexpr auto end()        noexcept { return iterator{nullptr}; }
+constexpr auto end()  const noexcept { return const_iterator{nullptr}; }
+constexpr auto cend() const noexcept { return const_iterator{nullptr}; }
+
+constexpr auto rbegin()        noexcept { return reverse_iterator{begin()}; }
+constexpr auto rbegin()  const noexcept { return const_reverse_iterator{begin()}; }
+constexpr auto crbegin() const noexcept { return const_reverse_iterator{begin()}; }
+
+constexpr auto rend()        noexcept { return reverse_iterator{end()}; }
+constexpr auto rend()  const noexcept { return const_reverse_iterator{end()}; }
+constexpr auto crend() const noexcept { return const_reverse_iterator{end()}; }
+
+constexpr auto front()       -> reference       { return *begin(); }
+constexpr auto front() const -> const_reference { return *begin(); }
+
+constexpr auto back()       -> reference       { return *iterator{tail_}; }
+constexpr auto back() const -> const_reference { return *const_iterator{tail_}; }
+Basically it's a lot of repetition, but watch out for getting the const stuff right.
+
+    // O(n)
+    size_t remove(const T& value) {
+        size_t count{ 0 };
+        node* current = head_;
+        while (current) {
+            node* next = current->next;
+
+            // if value exists, remove item
+            if (current->value == value) {
+                /*iterator next_it =*/ erase(current);
+                //next = next_it.ptr_;
+                ++count;
+            }
+
+            current = next;
+        }
+        return count;
+    }
+This is fine, but there's also remove_if()… which it turns out is more useful than remove(), because remove() can delegate to remove_if():
+
+constexpr auto remove(T const& value)
+{
+    return remove_if([&value](auto& item) { return item == value; });
+}
+remove_if() can also be used to implement other stuff.
+
+    // O(1)
+    // pos must be dereferenceable - ie cannot pass in end
+    // return iterator following the last removed element
+    iterator erase(iterator pos) {
+        node* before = pos.ptr_->prior;
+        node* after = pos.ptr_->next;
+
+        //  remove pos
+        if (before) {
+            before->next = after;
+        }
+        else {
+            head_ = after;
+        }
+        if (after) {
+            after->prior = before;
+        }
+        else {
+            // if there is no element after, means that head_ must be set to before
+            tail_ = before;
+        }
+
+        --size_;
+
+        delete pos.ptr_;
+        pos.ptr_ = nullptr;
+
+        return iterator(after);
+    }
+This is fine, though there's no point in assigning nullptr to pos.ptr_ after the delete.
+
+    // O(1)
+    // pos - element before which the content will be inserted
+    void splice(iterator pos, list& other) {
+        // this size becomes += other.size()
+        this->size_ += other.size();
+
+        // other size becomes zero
+        other.size_ = 0;
+
+        // pos->prior->next point to other.begin()
+        node* priornode = pos.ptr_->prior;
+        if (priornode) {
+            iterator beg(other.begin());
+            priornode->next = beg.ptr_;
+        }
+        else {
+            // reset head to be start of other list
+            head_ = other.head_;
+        }
+
+        // pos->prior point to last node in other
+        pos.ptr_->prior = other.tail_;
+
+        // last in other point to pos
+        other.tail_->next = pos.ptr_;
+
+        // other head_ point to node prior to pos
+        other.head_->prior = priornode;
+        other.head_ = other.tail_ = nullptr;
+    }
+I don't think you've accounted for the case where pos is end(); you can splice another list onto the end of a list, after all.
+
+There are also like a half-dozen other overloads of splice(), and the overloads that take a pair of iterators are probably more fundamental, meaning you can implement all the other overloads by delegating to that:
+
+constexpr auto splice(const_iterator p, list& other)
+{
+    return splice(p, other, other.begin(), other.end());
+}
+
+constexpr auto splice(const_iterator p, list&& other)
+{
+    return splice(p, other);
+}
+
+constexpr auto splice(const_iterator p, list& other, const_iterator q)
+{
+    return splice(p, other, q, std::next(q));
+}
+
+constexpr auto splice(const_iterator p, list&& other, const_iterator q)
+{
+    return splice(p, other, q);
+}
+
+constexpr auto splice(const_iterator p, list& other, const_iterator first, const_iterator last)
+{
+    // This is the only function you need to implement.
+}
+
+constexpr auto splice(const_iterator p, list&& other, const_iterator first, const_iterator last)
+{
+    return splice(p, other, first, last);
+}
+The one function you need to implement isn't that different than what you've already done. It's slightly more complicated because you're not necessarily taking the whole list, but not that much.
+
+    node* make_node(const T& value) {
+        return new node(value);
+    }
+Eh, there's no point to this function. If you were really going to use it, you'd either need several overloads to account for move-construction, default-construction, emplace-construction, in addition to the one you have for copy-construction.
+
+There are a couple of handy functions that std::list has that you're missing, like sort() and merge().
+
+You might also consider adding a template deduction guide for iterators (or, even better, iterator/sentinel pairs and ranges), so you can do auto x = list{std::ranges::begin(y), std::ranges::end(y)}; or auto x = list{some_range};, and T will be deduced.
+
+I'm not going to review the testing code (or the makefile), but I will say that your tests are generally far, far too complicated. A test should be dirt-basic simple: just setup, then the action being tested, then checking the result… that's it. Ideally, it should be three lines, with no control flow, but that's the dream, and it's usually not possible to be that simple. That's what you should aim for, though.
+
+Let me show you what I mean:
+
+TEST(push_back, push_back_increases_size_by_one) {
+
+    list<int> mylist;
+    EXPECT_EQ(mylist.size(), 0);
+
+    int numbers[]{0, 1, 2, 3, 4};
+    size_t size = sizeof(numbers) / sizeof(numbers[0]);
+    size_t entries = 0;
+    for (auto& n : numbers) {
+        mylist.push_back(n);
+        ++entries;
+        EXPECT_EQ(mylist.size(), entries);
+    }
+}
+So, you construct the list, then you test its size. But… that's not the point of this test. You're not testing that the size of a default-constructed list is zero. You're testing that push_back() increases the size. You may well have another test where test that the size of a default-constructed list is zero.
+
+You should have something more like this:
+
+TEST(default_construct, size_is_zero)
+{
+    list<int> mylist;   // this is both setup, and the action being tested
+
+    EXPECT_EQ(mylist.size(), 0);    // check
+}
+
+TEST(push_back, push_back_increases_size_by_one)
+{
+    list<int> mylist;   // setup
+
+    // No need to test that the size is zero. You know this because of the
+    // other test.
+
+    mylist.push_back(69);   // action being tested
+
+    EXPECT_EQ(mylist.size(), 1);    // check
+}
+Or, perhaps even better, you can use a value-parameterized test, either with a fixed list of numbers, or randomly-generated numbers. I'm not even going to attempt to write all the code for this—I really can't stand GoogleTest—but the actual test would look something like:
+
+TEST_P(your_fixture_class, push_back_increases_size_by_one)
+{
+    // Assuming the fixture is parameterized on list<int>::size_type, with N
+    // randomly generated values in the range [0, some_max_value]...
+
+    auto const initial_size = GetParam();   // ┐
+                                            // ├ setup
+    auto mylist = list<int>(initial_size);  // ┘
+
+    // The list(size_type) constructor should be tested elsewhere, so we know
+    // that mylist.size() is now initial_size.
+
+    mylist.push_back(69);   // action being tested
+
+    EXPECT_EQ(mylist.size(), initial_size + 1); // check
+}
+That will make GoogleTest run N tests, each with a randomly-generated size between zero and some_max_value inclusive, where each test creates a list with the given size, then pushes back a new value, and checks that the size did, indeed, increase by 1.
+
+You should get to know your test framework, and the features it offers. For example, consider this test:
+
+TEST(iterate, add_3_elements_able_to_iterate_each) {
+
+    list<int> mylist;
+    EXPECT_EQ(mylist.size(), 0);
+
+    int numbers[]{ 1, 2, 3};
+    size_t size = sizeof(numbers) / sizeof(numbers[0]);
+    size_t entries = 0;
+    for (auto& n : numbers) {
+        mylist.push_front(n);
+        ++entries;
+        EXPECT_EQ(mylist.size(), entries);
+    }
+
+    // elements sum to 6
+    int result = std::accumulate(mylist.begin(), mylist.end(), 0);
+
+    ASSERT_EQ(result, 6);
+    std::cout << "values in linked list sum to: " << result << std::endl;
+
+    auto it = mylist.begin();
+    std::cout << "1st value: " << *it << std::endl;
+    ASSERT_EQ(*it, numbers[2]);
+   
+    it++;
+    std::cout << "2nd value: " << *it << std::endl;
+    ASSERT_EQ(*it, numbers[1]);
+
+    ++it;
+    std::cout << "3rd value: " << *it << std::endl;
+    ASSERT_EQ(*it, numbers[0]);
+}
+This could be simplified to:
+
+TEST(iterate, add_3_elements_able_to_iterate_each)
+{
+    auto mylist = list<int>{};  // setup
+
+    // (Assuming you want to use push_front to add each item...)
+    for (auto n : {1, 2, 3})    // ┬ action being tested
+        mylist.push_front(n);   // ┘
+
+    EXPECT_THAT(mylist, ElementsAre(3, 2, 1));  // check
+}
+There's no need to check that the size is zero after default construction (certainly no need to do it in every test case), and no need to check that each push-front increases the size. Those things will be checked in other tests.
+
+And there's no need to check that iteration works two different ways (with an algorithm, and then one-at-a-time). If it works for one, it should work for the other (unless you have a reason to suspect that if you iterate over a list twice, it will be different the second time… if you have a reason to suspect that might happen, then write a test that tests just that). Keep tests simple.
+
+All your test cases should be like that: basically 3 lines that are setup, action, then check.
+
+I would also avoid creating new types like President and Person. Just use std::string. You can check for emplacement construction by taking advantage of some of std::string's constructors:
+
+TEST(emplace_back, push_back_emplace)
+{
+    using namespace std::string_view_literals;  // ┐
+                                                // ├ setup
+    auto mylist = list<std::string>{};          // ┘
+
+    mylist.emplace_back("Nelson Mandela"sv, 3, 7);  // action
+
+    EXPECT_EQ(mylist.front(), "son Man"sv); // check
+}
+
+// or...:
+
+TEST(emplace_back, push_back_emplace)
+{
+    auto const original = std::string_view{"Nelson Mandela"};   // ┐
+    auto const pos = std::string::size_type(3);                 // │
+    auto const n = std::string::size_type(7);                   // ├ setup
+    auto const expected = original.substr(pos, n);              // │
+                                                                // │
+    auto mylist = list<std::string>{};                          // ┘
+
+    mylist.emplace_back(original, pos, n);  // action
+
+    EXPECT_EQ(mylist.front(), expected);    // check
+}
+The latter version is way more than 3 lines… but it's cool because most of that is setup, and most of that setup is self-explanatory. Doing it this way is (more-or-less) idiot-proof, because if you ever get the whim, you can change any of the values in the first four lines, and the test should still work. It also makes parameterization easy, if you ever get that fancy.
+
+New types are new code… and new code should be tested. You don't want your test code needing tests. Don't dive into that quagmire. Just use std::string, or std::vector, or something else that you know works.
+
+These are guidelines, not rules, and it may make sense to make a “barking” type—a type that lets you know whenever it is constructed, copied, moved, whatever—so you can verify that no unnecessary copies/moves are happening. For example:
+
+struct tracked_type
+{
+    static std::size_t default_constructions = 0;
+    static std::size_t copy_constructions = 0;
+    static std::size_t move_constructions = 0;
+    static std::size_t copy_assignments = 0;
+    static std::size_t move_assignments = 0;
+    static std::size_t destructions = 0;
+
+    static constexpr auto clear_all_counters() noexcept
+    {
+        default_constructions = 0;
+        copy_constructions = 0;
+        move_constructions = 0;
+        copy_assignments = 0;
+        move_assignments = 0;
+        destructions = 0;
+    }
+
+    constexpr tracked_type() noexcept
+    {
+        ++default_construction;
+    }
+
+    // ... and so on for all the special ops...
+};
+
+TEST(emplace_back, no_copies_or_moves_happen)
+{
+    tracked_type::clear_all_counters();     // ┐
+                                            // ├ setup
+    auto tracked = list<tracked_type>{};    // ┘
+
+    tracked.emplace_back(); // action
+
+    EXPECT_EQ(tracked_type::default_constructions, 1);  // ┐
+    EXPECT_EQ(tracked_type::copy_constructions, 0);     // │
+    EXPECT_EQ(tracked_type::move_constructions, 0);     // ├ check
+    EXPECT_EQ(tracked_type::copy_assignments, 0);       // │
+    EXPECT_EQ(tracked_type::move_assignments, 0);       // │
+    EXPECT_EQ(tracked_type::destructions, 0);           // ┘
+}
+Similarly, it may make sense to create iterator wrappers that count the number of iterations to ensure that your input iterator functions really do only a single pass. But by that point, you should probably look into doing proper mocking. Your mileage may vary.

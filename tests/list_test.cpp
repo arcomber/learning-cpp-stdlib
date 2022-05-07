@@ -4,12 +4,13 @@
 //// debugging
 #include <iostream>
 
-#ifdef WIN32
+#ifdef _WIN32
 #include "detect_leaks.hpp"  // no valgrind on windows
 #endif
 
 #include "gtest/gtest.h"
 
+using namespace wheel;
 
 template<typename T>
 list<T> make_list() {
@@ -24,7 +25,7 @@ list<T> make_list() {
 class list_test : public ::testing::Test {
 protected:
 	void SetUp() override {
-#ifdef WIN32
+#ifdef _WIN32
 		start_detecting();
 #endif
 	}
@@ -36,16 +37,8 @@ protected:
 TEST_F(list_test, push_back_increases_size_by_one) {
 
 	list<int> mylist;
-	EXPECT_EQ(mylist.size(), 0);
-
-	int numbers[]{0, 1, 2, 3, 4};
-	size_t size = sizeof(numbers) / sizeof(numbers[0]);
-	size_t entries = 0;
-	for (auto& n : numbers) {
-		mylist.push_back(n);
-		++entries;
-		EXPECT_EQ(mylist.size(), entries);
-	}
+	mylist.push_back(77);
+	EXPECT_EQ(mylist.size(), 1);
 }
 
 // push_front increases size by 1 each time
@@ -68,7 +61,6 @@ TEST_F(list_test, push_front_increases_size_by_one) {
 TEST_F(list_test, iterate_add_3_elements_able_to_iterate_each) {
 
 	list<int> mylist;
-	EXPECT_EQ(mylist.size(), 0);
 
 	int numbers[]{ 1, 2, 3};
 	size_t size = sizeof(numbers) / sizeof(numbers[0]);

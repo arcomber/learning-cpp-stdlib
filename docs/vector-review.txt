@@ -1,0 +1,265 @@
+Init
+My questions are:
+
+OK
+
+Are there any memory allocation/deallocation errors in this implementation?
+
+Yes. Your container does not handle a type T with a constructor/destructor correctly.
+
+Is the design ok? Can it be improved?
+
+Good start.
+
+Any bugs?
+
+Yes; a whole bunch. All around, not constructing non-trivial types.
+
+Code Review: Major Issues
+Let's start with the main part of your code:
+
+    bool resize_array(size_t new_size) {
+        void* new_pointer = realloc(array_, new_size * sizeof(T));
+        if (new_pointer) {
+            array_ = static_cast<T*>(new_pointer);
+            std::cout << "array at address: " << array_ << " size increased to: " << new_size << std::endl;
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+OK. You start by using realloc() a C function. Unlike most people you actually use the realloc() function correctly (Congratulations :-). Personally, still not a fan though. BUT it is a valid way of implementing this, because you are only allocating space you don't actually want to force a call to the constructor at this point.
+
+The down side to this is that you will not get an exception when you are out of memory and as a result you need to spend precious extra resources checking and making sure that the object is not valid if you fail to allocate memory.
+
+You fail to make this check on every call to resize_array(). So if your constructor fails (on the call to resize_array()), you have an invalid object that the user is going to think is valid (and use it as if it was). If you fail to allocate you really need to throw an exception as you have not maintained the contract of the interface that required you to call the resize_array().
+
+The second issues with this is that realloc() does not correctly call the copy (or move) constructor to move the object. It simply does a byte copy of the data that was allocated in the array. The data in the array is of type T, and if is not POD then a simple copy is not technically allowed: you need to use the copy (or move) constructor or move the object.
+
+So I would implement this with new.
+
+ void resize_array(size_t new_capacity)
+ {
+     // Allocate
+     // Succ: newArray points at valid memory
+     // Fail: Throws exception.
+     T* newArray = static_cast<T*>(::operator new(sizeof(T) * new_capacity);
+
+     // Try and move your data.
+     // to the new location.
+     // Note: Not all types are movable so you may need SFINE to copy.
+     std::move(array, array+size, newArray);
+
+     // Your new array is all set up so swap with the old one
+     std::swap(array_, newArray);
+     std::swap(capacity), new_capacity);
+
+     // release the old array
+     release(newArray); // Remember we swapped array and newArray
+                        // So this releases the old memory.
+                        // Note: release is a bit more complex than
+                        //       you think but we will get to that in
+                        //       destructor.
+}
+ 
+RIAA at its best:
+
+    ~resizing_array() {
+        std::cout << "deallocating array at address: " << array_ << std::endl;
+        free(array_);
+    }
+Yes you have destroyed the container. You correctly used free() because you allocated with realloc(). BUT what about the objects of type T that were stored in the array? If T is not a POD type they also need to be destroyed.
+
+    ~resizing_array()
+    {
+        for (int loop = 0; loop != size; ++loop) {
+            // For any non trivial type you will need
+            // to manually call the destructor to make sure the
+            // object is correctly destroyed.
+            array_[size-1-loop].~T();
+        }
+        free(array_);
+    }
+Notice: I destroy them in reverse order (as that is the order a C-Array would have its members destroyed in C++ (and this is also how std::vector<> does it to mimic the behavior of a C-Array).
+
+Adding elements.
+It seems that should work:
+
+    void push_back(const T& v) {
+        if (size_ == capacity_) {
+            resize_array(size_ * 2);
+            capacity_ = size_ * 2;
+        }
+        array_[size_++] = v;
+    }
+But unfortunately this is broken (for any non trivial type T).
+
+        array_[size_++] = v;
+The assignment operator assumes that the "left hand side" is already constructed (i.e. you have called the constructor on the LHS and started the lifetime of the object). Unfortunately you have not done that, so you can not use the assignment operator here.
+
+You must use placement new.
+
+       new (array_ + size_) T(v);
+       ++size;
+This is a version of new that does not allocate any memory but calls the constructor of T using the memory location provided.
+
+Removing elements:
+Conversely, when you remove an element, you must destroy it (or have some way to tell the difference between constructed and non-constructed objects in your array).
+
+    void pop_back() {
+        --size_;
+        array_[size].~T(); // Manually call the destructor.
+    }
+Code Review: Things you could add to make it better
+Learn standard idioms:
+
+        resizing_array& operator=(const resizing_array& other) {
+            if (this != &other) {
+                size_ = other.size();
+                capacity_ = other.capacity();
+                free(array_);
+                array_ = nullptr;
+                resize_array(capacity_);
+                std::cout << "op= allocated array at address: " << array_ << std::endl;
+                std::copy(other.begin(), other.end(), array_);
+            }
+            return *this;
+        }
+This is an old fashioned way of doing this. Also in most situations the test for self assignment is going to make the class less efficient under normal usage. Yes you need to be able to handle self-assignment but under normal situations this is so rare. Thus you make your normal usage less efficient.
+
+Also like in the destructor you do not clean up the members.
+
+Additionally this does not provide the strong exception guarantee. This means that either the operation worked, or the state of the object did not change. Here if the resize_array() fails you have lost all the original state of the array as you have already called free() on the date. Not sure why you did not utilize the fact that realloc() does not free the memory when it fails to allocate!
+
+The standard way of doing this is called the copy and swap idiom:
+
+        // Notice the pass by value.
+        // This forces a copy (that you were manually doing above)
+        resizing_array& operator=(resizing_array other)
+        {
+            // You then swap the current value with
+            // the new copy, and when other goes out of scope
+            // Its destructor does all the requried clean up for you.
+            swap(other);
+            return *this;
+        }
+I would note that this version of assignment works perfectly for both copy and move operations. You don't need two different versions. If called with a normal object then a copy is made. If called with an rvalue reference it will use the move constructor to create other and then swap with the current state.
+
+So you need to define copy and move constructors but only a single assignment operator.
+
+Your push operator "copies" object into your vector. It would be nice to support move when adding elements into the vector:
+
+void push_back(T&& v)   // Move push
+{
+        if (size_ == capacity_) {
+            resize_array(size_ * 2);
+            capacity_ = size_ * 2;
+        }
+        new (array_ + size_) T(std::move(v));
+}
+Also the standard vector allows you to construct objects in place in the vector with emplace_back(). This is a nice way of creating things so you don't have to pre-create them but create them at the place of usage.
+
+template<typename... P>
+void emplace_back(P&&... v)
+{
+        if (size_ == capacity_) {
+            resize_array(size_ * 2);
+            capacity_ = size_ * 2;
+        }
+        new (array_ + size_) T(std::forward<P>(v)...);
+}
+Also notice that we have used the same piece of code threee times in a row. It may be worth encapsulating this in its own method.
+
+void ensureRoomForMoreElements(std::size_t spaceNeeded = 1)
+{
+        if (spaceNeeded < (capacity_ - size_)) {
+            std::size_t newSize = max(capacity_ + spaceNeeded, size_ * 2);
+            resize_array(newSize);
+            capacity_ = newSize;   // Why is this not don in resize_array() function?
+        }
+}
+Always nice to be able to swap object cheaply rather than relying on copying.
+
+ void swap(resizing_array& other) noexcept;
+ friend void swap(resizing_array& lhs, resizing_array& rhs)
+ {
+     lhs.swap(rhs);
+ }
+This is more controversial but nice to be able to print things using the standard C++ input / output operators.
+
+ void print(std::ostream& out = std::cout) const
+ {
+     // print your vector
+ }
+ friend std::ostream& operator<<(std::ostream& str, resizing_array& a)
+ {
+     a.print(str);
+     return str;
+ }
+Code Review: Minor Issues
+I like that you are using a namespace:
+
+namespace play {
+But "play" seems a bit generic and potentially you are going to clash with somebody else.
+
+Here you don't use an initializer list.
+
+        template< typename input_iterator >
+        resizing_array(input_iterator first, input_iterator last) {
+But in the next constructor you do.
+
+        resizing_array(std::initializer_list<T> init) : size_(init.size()), capacity_(init.size()), array_(nullptr) {
+I would always use the initializer list for consistency. If your members are non-trivial this is important, but by always doing it you remain consistent.
+
+        template< typename input_iterator >
+        resizing_array(input_iterator first, input_iterator last) {
+            size_ = std::distance(first, last);
+            capacity_ = size_;
+            array_ = nullptr;
+            // You forgot to check the return result of this function
+            // Your std::copy is going to blow up if it failed.
+            resize_array(capacity_);
+            std::copy(first, last, array_);
+        }
+        resizing_array(std::initializer_list<T> init) : size_(init.size()), capacity_(init.size()), array_(nullptr) {
+            size_ = init.size();
+            capacity_ = size_;
+            resize_array(capacity_);
+            // You forgot to check the return result of this function
+            // Your std::copy is going to blow up if it failed.
+            std::copy(init.begin(), init.end(), array_);
+        }
+But I would also note that these first two constructors are practically identical. Why not using constructor chaining to achieve the same effect?
+
+Move operators should be marked as noexcept.
+
+        resizing_array(resizing_array&& other) : size_(other.size()), capacity_(other.capacity()), array_(other.begin()) {
+            other.size_ = 0;
+            other.capacity_ = 0;
+            other.array_ = nullptr;
+        }
+
+        resizing_array& operator=(resizing_array&& other) {
+            free(array_);
+            array_ = other.array_;
+            size_ = other.size();
+            capacity_ = other.capacity();
+            other.array_ = nullptr;
+            other.size_ = 0;
+            other.capacity_ = 0;
+        }
+        T* end() {
+            return array_ + capacity_; // You mean size_ here.
+        }
+        const T* begin() const {
+            return array_;
+        }
+        const T* end() const {
+            return array_ + capacity_;
+        }
+Why not also add cbegin() and cend() ?
+
+Self Plug:
+You can read some articles I wrote on the subject: https://lokiastari.com/series/
+
