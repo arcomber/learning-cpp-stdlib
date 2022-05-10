@@ -3,7 +3,7 @@ CXXFLAGS = -g -L/usr/local/lib -std=c++11
 LIBS = -lgtest_main -lgtest -lpthread
 INCS = -I./ -I/usr/local/include -I../src
 
-CPPSOURCES = list_test.cpp
+CPPSOURCES = list_test.cpp vector_test.cpp
 OBJS = $(CPPSOURCES:.cpp=.o)
 
 testAll: $(OBJS)

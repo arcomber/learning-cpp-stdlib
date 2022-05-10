@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <initializer_list>
 #include <utility>
-#include <xutility> // bidirectional_iterator_tag
 
 namespace wheel {  // as in re-inventing the wheel
 
@@ -13,7 +12,11 @@ namespace wheel {  // as in re-inventing the wheel
 	class list {
 	public:
 
-		struct node;
+		struct node {
+			T value;
+			node* next = nullptr;
+			node* prior = nullptr;
+		};
 
 		struct iterator {
 
@@ -43,10 +46,10 @@ namespace wheel {  // as in re-inventing the wheel
 			T& operator*() const { return ptr_->value; }
 			T* operator->() { return &ptr_->value; }
 
-			bool operator==(const iterator& other) { return ptr_ == other.ptr_; }
-			bool operator!=(const iterator& other) { return ptr_ != other.ptr_; }
+			bool operator==(const iterator& other) const { return ptr_ == other.ptr_; }
+			bool operator!=(const iterator& other) const { return ptr_ != other.ptr_; }
 
-			node* ptr_;
+			node* ptr_ = nullptr;
 		};
 
 		struct const_iterator {
@@ -58,6 +61,8 @@ namespace wheel {  // as in re-inventing the wheel
 			using iterator_category = std::bidirectional_iterator_tag;
 
 			constexpr const_iterator() noexcept = default;
+
+			constexpr const_iterator(node* p) noexcept : ptr_{ p } {}
 
 			// Implicit conversion from iterator:
 			constexpr const_iterator(iterator const& it) noexcept {
@@ -95,15 +100,13 @@ namespace wheel {  // as in re-inventing the wheel
 				return old;
 			}
 
-
-
 			const T& operator*() const { return ptr_->value; }
 			T* operator->() { return &ptr_->value; }
 
-			bool operator==(const iterator& other) { return ptr_ == other.ptr_; }
-			bool operator!=(const iterator& other) { return ptr_ != other.ptr_; }
+			bool operator==(const const_iterator& other) const { return ptr_ == other.ptr_; }
+			bool operator!=(const const_iterator& other) const { return ptr_ != other.ptr_; }
 
-			node const* ptr_;
+			node const* ptr_ = nullptr;
 		};
 
 		// O(1)
@@ -176,7 +179,7 @@ namespace wheel {  // as in re-inventing the wheel
 		}
 
 		// O(n)
-		bool operator==(const list<T>& other) {
+		bool operator==(const list<T>& other) const {
 
 			if (size_ != other.size()) {
 				return false;
@@ -213,7 +216,9 @@ namespace wheel {  // as in re-inventing the wheel
 			}
 			else {
 				inserted->prior = pos.ptr_->prior;
-				pos.ptr_->prior = inserted;
+				if (pos.ptr_->prior) {
+					pos.ptr_->prior->next = inserted;
+				}
 			}
 
 			// if inserted is now at head_, update head_
@@ -247,9 +252,10 @@ namespace wheel {  // as in re-inventing the wheel
 			node* newnode = new node{ value };
 
 			if (head_) {
-				newnode->next = head_;
-				newnode->value = value;
-				head_->prior = newnode;
+
+				node* oldhead = head_;
+				oldhead->prior = newnode;
+				newnode->next = oldhead;
 				head_ = newnode;
 			}
 			else {
@@ -294,14 +300,14 @@ namespace wheel {  // as in re-inventing the wheel
 				if (newtail) {
 					newtail->next = nullptr;
 				}
-				else {
-					// means that head_ has also been erased
-					head_ = nullptr;
-				}
 
 				delete tail_;
 				tail_ = newtail;
 				--size_;
+				// TODO INVESTIGATE better way to handle this
+				if (size_ == 0) {
+					head_ = nullptr;
+				}
 			}
 		}
 
@@ -311,10 +317,6 @@ namespace wheel {  // as in re-inventing the wheel
 				node* newhead = head_->next;
 				if (newhead) {
 					newhead->prior = nullptr;
-				}
-				else {
-					// means that head_ has also been erased
-					head_ = nullptr;
 				}
 
 				delete head_;
@@ -444,12 +446,6 @@ namespace wheel {  // as in re-inventing the wheel
 		node* head_ = nullptr;
 		node* tail_ = nullptr;
 		size_t size_ = 0;
-
-		struct node {
-			T value;
-			node* next = nullptr;
-			node* prior = nullptr;
-		};
 	};
 
 }  // namespace wheel

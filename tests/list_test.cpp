@@ -48,7 +48,6 @@ TEST_F(list_test, push_front_increases_size_by_one) {
 	EXPECT_EQ(mylist.size(), 0);
 
 	int numbers[]{ 0, 1, 2, 3, 4 };
-	size_t size = sizeof(numbers) / sizeof(numbers[0]);
 	size_t entries = 0;
 	for (auto& n : numbers) {
 		mylist.push_front(n);
@@ -63,7 +62,6 @@ TEST_F(list_test, iterate_add_3_elements_able_to_iterate_each) {
 	list<int> mylist;
 
 	int numbers[]{ 1, 2, 3};
-	size_t size = sizeof(numbers) / sizeof(numbers[0]);
 	size_t entries = 0;
 	for (auto& n : numbers) {
 		mylist.push_front(n);
@@ -126,7 +124,6 @@ TEST_F(list_test, pop_back_elements_popped_in_correct_sequence) {
 	EXPECT_EQ(mylist.size(), 0);
 
 	int numbers[]{ 1, 2, 3 };
-	size_t size = sizeof(numbers) / sizeof(numbers[0]);
 	size_t entries = 0;
 	for (auto& n : numbers) {
 		mylist.push_back(n);
@@ -172,7 +169,6 @@ TEST_F(list_test, clear_causes_size_zero) {
 	EXPECT_EQ(mylist.size(), 0);
 
 	int numbers[]{ 0, 1, 2, 3, 4 };
-	size_t size = sizeof(numbers) / sizeof(numbers[0]);
 	size_t entries = 0;
 	for (auto& n : numbers) {
 		mylist.push_front(n);
@@ -556,7 +552,6 @@ TEST_F(list_test, remove_elements_removed_correctly) {
 	EXPECT_EQ(mylist.size(), 0);
 
 	int numbers[]{ 1,2,3,1,2,3 };
-	size_t size = sizeof(numbers) / sizeof(numbers[0]);
 	size_t entries = 0;
 	for (auto& n : numbers) {
 		mylist.push_back(n);
