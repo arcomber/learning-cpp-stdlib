@@ -42,6 +42,13 @@ TEST_F(set_test, inserted_value_can_be_retrieved) {
 	EXPECT_EQ(*it, 1);
 }
 
+TEST_F(set_test, inserted_value_iterator_returns_correctly) {
+	ordered_set mylist;
+	auto result = mylist.insert(1);
+	EXPECT_EQ(*result.first, 1);
+	EXPECT_EQ(result.second, true);
+}
+
 TEST_F(set_test, find_fails_when_set_is_empty) {
 	ordered_set mylist;
 	auto it = mylist.find(2);
@@ -58,17 +65,20 @@ TEST_F(set_test, find_fails_when_value_not_in_set) {
 TEST_F(set_test, clear_causes_size_zero) {
 
 	ordered_set mylist;
+	mylist.insert(1);
+	EXPECT_EQ(mylist.size(), 1);
+	mylist.clear();
 	EXPECT_EQ(mylist.size(), 0);
 }
 
 TEST_F(set_test, clear_and_start_again_succeeds) {
 
 	ordered_set mylist;
-	EXPECT_EQ(mylist.size(), 0);
+	mylist.insert(1);
 
 	mylist.clear();
 	EXPECT_EQ(mylist.size(), 0);
 
-  mylist.insert(3);
-  EXPECT_EQ(mylist.size(), 1);
+    mylist.insert(3);
+    EXPECT_EQ(mylist.size(), 1);
 }

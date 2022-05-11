@@ -78,28 +78,35 @@ struct binary_tree_node {
 
     ordered_set() = default;
 
+    ~ordered_set() {
+        clear();
+    }
+
     // Returns a pair consisting of an iterator to the inserted element(or to the 
     // element that prevented the insertion) and a bool value set to true if the 
     // insertion took place.
-    // will need iterator for that: std::pair<std::set<int>::iterator, bool>
-    // TODO change from void to std::pair
-    void insert(int value) {
-      // do something with the root
+    std::pair<ordered_set::iterator, bool> insert(int value) {
+        std::pair<ordered_set::iterator, bool> result{nullptr, false};
         if (root == nullptr) {
             root = make_node(value);
             ++size_;
+            result.first = root;
+            result.second = true;
         }
         else {
-            if (add_node(root, value)) {
+            binary_tree_node* inserted_node = nullptr;;
+            if (add_node(root, value, inserted_node)) {
                 ++size_;
+                result.first = inserted_node;
+                result.second = true;
             }
         }
+        return result;
     }
 
     iterator find(const int& key) {
         binary_tree_node* node = find(root, key);
         if (node == nullptr) {
-            // what do we return here? TODO
             return iterator(nullptr);
         }
         else {
@@ -112,7 +119,9 @@ struct binary_tree_node {
 
     // INVESTIGATE why c++11 version has noexcept
     void clear() {
-
+        deallocate_nodes(root);
+        root = nullptr;
+        size_ = 0;
     }
 
     size_t size() const {
@@ -133,23 +142,25 @@ struct binary_tree_node {
           return node;
       }
 
-      bool add_node(binary_tree_node* tree, int value) {
+      bool add_node(binary_tree_node* tree, int value, binary_tree_node*& inserted_node) {
           if (value < tree->value) {
               if (tree->left == nullptr) {
                   tree->left = make_node(value);
+                  inserted_node = tree->left;
                   return true;
               }
               else {
-                  return add_node(tree->left, value);
+                  return add_node(tree->left, value, inserted_node);
               }
           }
           else if (value > tree->value) {
               if (tree->right == nullptr) {
                   tree->right = make_node(value);
+                  inserted_node = tree->right;
                   return true;
               }
               else {
-                  return add_node(tree->right, value);
+                  return add_node(tree->right, value, inserted_node);
               }
           }
           // note that if value is equal, do nothing right now
@@ -164,6 +175,14 @@ struct binary_tree_node {
                   return find(tree->left, value);
               else
                   return find(tree->right, value);
+          }
+      }
+
+      void deallocate_nodes(binary_tree_node* tree) {
+          if (tree != nullptr) {
+              deallocate_nodes(tree->left);
+              deallocate_nodes(tree->right);
+              delete tree;
           }
       }
 

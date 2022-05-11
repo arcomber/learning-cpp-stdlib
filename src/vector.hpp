@@ -106,7 +106,7 @@ namespace wheel {  // as in re-inventing the wheel
 
         void push_back(const T& v) {
             if (size_ == capacity_) {
-                resize_array(size_ * 2);
+                resize_array(size_ == 0 ? 8 : size_ * 2);
             }
             array_[size_++] = v;
         }
