@@ -247,7 +247,7 @@ TEST_F(list_test, assignment_elements_added_correctly) {
 }
 
 // to test move constructor
-list<int> fill(const std::vector<int>& input, int*& ptr) {
+static list<int> fill(const std::vector<int>& input, int*& ptr) {
 	list<int> list1;
 	for (auto it = input.begin(); it != input.end(); ++it) {
 		list1.push_back(*it);

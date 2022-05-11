@@ -1,9 +1,9 @@
 CXX = g++
-CXXFLAGS = -g -L/usr/local/lib -std=c++11
+CXXFLAGS = -g -L/usr/local/lib -std=c++14
 LIBS = -lgtest_main -lgtest -lpthread
 INCS = -I./ -I/usr/local/include -I../src
 
-CPPSOURCES = list_test.cpp vector_test.cpp
+CPPSOURCES = list_test.cpp vector_test.cpp set_test.cpp
 OBJS = $(CPPSOURCES:.cpp=.o)
 
 testAll: $(OBJS)

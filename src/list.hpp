@@ -43,6 +43,22 @@ namespace wheel {  // as in re-inventing the wheel
 				return old;
 			}
 
+			// iterator_category bidirectional, so have to implement --
+			iterator& operator--() {
+				if (ptr_) {
+					ptr_ = ptr_->prior;
+				}
+				return *this;
+			}
+
+			iterator operator--(int) {
+				auto old = *this;
+				if (ptr_) {
+					ptr_ = ptr_->prior;
+				}
+				return old;
+			}
+
 			T& operator*() const { return ptr_->value; }
 			T* operator->() { return &ptr_->value; }
 
